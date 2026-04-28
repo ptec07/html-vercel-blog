@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NVIDIA Transformer Engine mixed precision·FP8 실행 가이드</title>
+  <meta name="publish-date" content="2026-04-23" />
+  <style>:root {
+  color-scheme: light;
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --text: #1f2937;
+  --muted: #4b5563;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --code-bg: #0f172a;
+  --code-text: #e5eefc;
+  --inline-code-bg: #eef2ff;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #f8f9fc 0%, #f4f6fb 100%);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.78;
+}
+.page { padding: 40px 20px 72px; }
+.markdown-body {
+  max-width: 820px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid rgba(229, 231, 235, 0.9);
+  border-radius: 20px;
+  padding: 48px 56px;
+  box-shadow: 0 10px 35px rgba(15, 23, 42, 0.06);
+}
+h1, h2, h3, h4, h5, h6 {
+  color: #111827;
+  line-height: 1.25;
+  margin-top: 1.8em;
+  margin-bottom: 0.7em;
+  letter-spacing: -0.02em;
+}
+h1 { font-size: 2.2rem; margin-top: 0; }
+h2 { font-size: 1.65rem; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.3rem; }
+p, ul, ol, blockquote, table, pre { margin-top: 1em; margin-bottom: 1em; }
+ul, ol { padding-left: 1.5em; }
+li + li { margin-top: 0.35em; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+blockquote {
+  margin-left: 0;
+  padding: 0.9rem 1rem;
+  border-left: 4px solid #93c5fd;
+  background: #f8fbff;
+  color: var(--muted);
+  border-radius: 12px;
+}
+img { max-width: 100%; height: auto; border-radius: 14px; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+p code, li code, td code {
+  background: var(--inline-code-bg);
+  color: #3730a3;
+  padding: 0.18em 0.42em;
+  border-radius: 8px;
+}
+pre {
+  background: var(--code-bg);
+  color: var(--code-text);
+  padding: 1rem 1.1rem;
+  border-radius: 16px;
+  overflow-x: auto;
+}
+pre code { background: transparent; color: inherit; padding: 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+th, td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 0.9rem;
+  text-align: left;
+}
+th { background: #f8fafc; color: #111827; }
+tr:last-child td { border-bottom: 0; }
+@media (max-width: 760px) {
+  .page { padding: 18px 12px 40px; }
+  .markdown-body { padding: 24px 18px; border-radius: 16px; }
+  h1 { font-size: 1.8rem; }
+  h2 { font-size: 1.4rem; }
+}</style>
+</head>
+<body>
+  <main class="page">
+    <article class="markdown-body">
+<h1>NVIDIA Transformer Engine mixed precision·FP8 실행 가이드</h1>
+<blockquote>
+<p>Source: <a href="https://www.marktechpost.com/2026/04/06/an-implementation-guide-to-running-nvidia-transformer-engine-with-mixed-precision-fp8-checks-benchmarking-and-fallback-execution/">https://www.marktechpost.com/2026/04/06/an-implementation-guide-to-running-nvidia-transformer-engine-with-mixed-precision-fp8-checks-benchmarking-and-fallback-execution/</a></p>
+</blockquote>
+<h2>Summary</h2>
+<p>이 글은 NVIDIA Transformer Engine을 Colab/PyTorch 환경에서 실제로 굴려보며 mixed precision과 FP8 경로를 점검하는 구현형 튜토리얼이다. 단순 설치법만 다루지 않고 GPU·CUDA·cuDNN 준비 상태 확인, Transformer Engine 설치/빌드 시도, 실패 시 fallback 경로 유지, teacher-student 모델 학습, baseline PyTorch와 TE 경로 비교, 속도·메모리 벤치마크, 시각화까지 한 번에 묶어 보여준다. 핵심은 “FP8이 항상 바로 되는 것은 아니므로, 환경 진단과 graceful fallback을 포함한 실험 파이프라인으로 접근하라”는 점이다.</p>
+<p>![[assets/NVIDIA Transformer Engine mixed precision·FP8 실행 가이드/image-01.png]]</p>
+<h2>Cleaned Content</h2>
+<h3>글의 흐름</h3>
+<ul>
+<li>환경 준비: Python/PyTorch/Matplotlib 설치 후 GPU, CUDA, nvcc, cuDNN 헤더 존재 여부를 점검한다.</li>
+<li>Transformer Engine 설치: <code>transformer_engine[core_cu12]</code> 설치를 시도하고, 가능하면 PyTorch extension까지 빌드한다.</li>
+<li>정밀도 판정: TE 사용 가능 여부, FP8 가능 여부, BF16 지원 여부를 확인한 뒤 autocast 전략을 고른다.</li>
+<li>모델 구성: teacher / baseline student / TE student 네트워크를 맞춰서 공정 비교가 가능하도록 설계한다.</li>
+<li>실험 실행: 두 경로를 학습·평가하고 step 시간, peak CUDA memory, loss 추이를 비교한다.</li>
+<li>결론: FP8이 막히더라도 fallback PyTorch 경로를 남겨 실험 자체는 계속 진행할 수 있게 한다.</li>
+</ul>
+<h3>문단별 핵심</h3>
+<ul>
+<li>이 튜토리얼은 Transformer Engine을 “설치해보기”에서 끝내지 않고, 실제 deep learning 워크플로에서 mixed precision 가속을 어떻게 운영하는지 보여준다.</li>
+<li>먼저 Colab 환경에서 GPU 이름, CUDA 버전, Python 버전, toolkit 경로를 수집해 런타임 상태를 명확히 확인한다.</li>
+<li>이후 TE core package 설치를 시도하고, <code>nvcc</code>와 <code>cuDNN</code> 헤더가 있을 때만 PyTorch extension 빌드까지 진행한다.</li>
+<li>extension 빌드가 불가능하면 튜토리얼 전체가 깨지지 않도록 fallback PyTorch 경로를 유지한다.</li>
+<li>FP8/BF16 지원 여부를 보고 autocast 컨텍스트를 고른 뒤, baseline mixed precision과 TE 경로를 나란히 비교한다.</li>
+<li>teacher-student 구조를 사용해 두 경로의 학습 품질과 자원 효율을 함께 측정한다.</li>
+<li>마지막에는 loss, 평균 step 시간, peak memory를 요약 딕셔너리와 시각화로 정리해 실제 효율 차이를 해석한다.</li>
+</ul>
+<h3>환경 점검과 필수 패키지 설치</h3>
+<pre><code class="language-python">import os
+import sys
+import json
+import time
+import math
+import random
+import shutil
+import platform
+import subprocess
+import statistics
+
+
+def run(cmd, check=True):
+   print(&quot;\n[RUN]&quot;, &quot; &quot;.join(cmd))
+   result = subprocess.run(cmd, text=True, capture_output=True)
+   if result.stdout.strip():
+       print(result.stdout[-4000:])
+   if result.returncode != 0 and result.stderr.strip():
+       print(result.stderr[-4000:])
+   if check and result.returncode != 0:
+       raise subprocess.CalledProcessError(result.returncode, cmd)
+   return result
+
+
+def has_cmd(name):
+   return shutil.which(name) is not None
+
+
+run([sys.executable, &quot;-m&quot;, &quot;pip&quot;, &quot;install&quot;, &quot;-q&quot;, &quot;--upgrade&quot;, &quot;pip&quot;])
+run([sys.executable, &quot;-m&quot;, &quot;pip&quot;, &quot;install&quot;, &quot;-q&quot;, &quot;ninja&quot;, &quot;packaging&quot;, &quot;matplotlib&quot;])
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+
+assert torch.cuda.is_available(), &quot;This notebook needs a GPU runtime in Colab.&quot;
+
+
+gpu_name = torch.cuda.get_device_name(0)
+cc_major, cc_minor = torch.cuda.get_device_capability(0)
+cuda_runtime = torch.version.cuda
+python_version = sys.version.split()[0]
+torch_version = torch.__version__
+cuda_home = os.environ.get(&quot;CUDA_HOME&quot;, &quot;/usr/local/cuda&quot;)
+nvcc_path = shutil.which(&quot;nvcc&quot;) or os.path.join(cuda_home, &quot;bin&quot;, &quot;nvcc&quot;)
+cudnn_header_candidates = [
+   os.path.join(cuda_home, &quot;include&quot;, &quot;cudnn.h&quot;),
+   &quot;/usr/include/cudnn.h&quot;,
+   &quot;/usr/local/include/cudnn.h&quot;,
+]
+
+
+# ... (중략)
+</code></pre>
+<h3>Transformer Engine 설치 시도와 fallback 설정</h3>
+<pre><code class="language-python">te_available = False
+te_mode = &quot;fallback&quot;
+te_import_error = None
+
+
+try:
+   run([sys.executable, &quot;-m&quot;, &quot;pip&quot;, &quot;install&quot;, &quot;-q&quot;, &quot;transformer_engine[core_cu12]&quot;])
+except Exception as e:
+   print(&quot;Core wheel install failed:&quot;, repr(e))
+
+
+can_try_te_torch = nvcc_exists and cudnn_header_exists
+
+
+if can_try_te_torch:
+   env = os.environ.copy()
+   env[&quot;NVTE_FRAMEWORK&quot;] = &quot;pytorch&quot;
+   env[&quot;MAX_JOBS&quot;] = &quot;1&quot;
+   env[&quot;NVTE_BUILD_THREADS_PER_JOB&quot;] = &quot;1&quot;
+   env[&quot;CUDA_PATH&quot;] = cuda_home
+   env[&quot;CUDA_HOME&quot;] = cuda_home
+   try:
+       print(&quot;\nAttempting to build the PyTorch extension for Transformer Engine...&quot;)
+       result = subprocess.run(
+           [sys.executable, &quot;-m&quot;, &quot;pip&quot;, &quot;install&quot;, &quot;-q&quot;, &quot;--no-build-isolation&quot;, &quot;transformer_engine[pytorch]&quot;],
+           text=True,
+           capture_output=True,
+           env=env,
+       )
+       if result.stdout.strip():
+           print(result.stdout[-4000:])
+       if result.returncode != 0 and result.stderr.strip():
+           print(result.stderr[-4000:])
+       if result.returncode == 0:
+           import transformer_engine.pytorch as te
+           from transformer_engine.common import recipe
+           te_available = True
+           te_mode = &quot;transformer_engine&quot;
+       else:
+           te_import_error = result.stderr[-4000:] if result.stderr else &quot;Unknown pip build error&quot;
+   except Exception as e:
+       te_import_error = repr(e)
+else:
+   te_import_error = &quot;Missing nvcc or cuDNN headers in this Colab runtime, so TE PyTorch extension cannot be built here.&quot;
+
+
+if te_available:
+   try:
+       fp8_available, fp8_reason = te.is_fp8_available(return_reason=True)
+   except Exception as e:
+       fp8_available, fp8_reason = False, f&quot;Could not query FP8 availability: {e}&quot;
+   try:
+       bf16_available = te.is_bf16_available()
+   except Exception:
+       bf16_available = torch.cuda.is_bf16_supported()
+# ... (중략)
+</code></pre>
+<h3>학습 루프 및 벤치마크</h3>
+<pre><code class="language-python">baseline_losses = []
+te_losses = []
+mode_name = &quot;TE-FP8&quot; if (te_available and fp8_available) else (&quot;TE-BF16/FP16&quot; if te_available else &quot;Fallback-PyTorch&quot;)
+
+
+print(&quot;\n&quot; + &quot;=&quot; * 120)
+print(&quot;TRAINING&quot;)
+print(&quot;=&quot; * 120)
+
+
+for step in range(1, steps + 1):
+   b_loss = train_baseline_step()
+   t_loss = train_te_step(use_fp8=fp8_available)
+   baseline_losses.append(b_loss)
+   te_losses.append(t_loss)
+   if step == 1 or step % 5 == 0 or step == steps:
+       print(f&quot;step={step:02d} | baseline_loss={b_loss:.6f} | te_path_loss={t_loss:.6f} | mode={mode_name}&quot;)
+
+
+@torch.no_grad()
+def evaluate_model(model, is_te=False, use_fp8=False, eval_batches=8):
+   model.eval()
+   vals = []
+   for _ in range(eval_batches):
+       tokens, target = make_batch(batch_size, seq_len, vocab_size, device)
+       if is_te:
+           pred = model(tokens, use_fp8=use_fp8)
+       else:
+           with baseline_autocast():
+               pred = model(tokens)
+       vals.append(float(F.mse_loss(pred, target).item()))
+   return sum(vals) / len(vals)
+
+
+baseline_eval = evaluate_model(baseline_model, is_te=False)
+te_eval = evaluate_model(te_model, is_te=True, use_fp8=fp8_available)
+
+
+def benchmark_train_step(model, optimizer, is_te=False, use_fp8=False, warmup=5, iters=20):
+   times_ms = []
+   mems_mb = []
+   for _ in range(warmup):
+       optimizer.zero_grad(set_to_none=True)
+       tokens, target = make_batch(batch_size, seq_len, vocab_size, device)
+       if is_te:
+           pred = model(tokens, use_fp8=use_fp8)
+       else:
+           with baseline_autocast():
+               pred = model(tokens)
+       loss = F.mse_loss(pred, target)
+       loss.backward()
+       optimizer.step()
+   torch.cuda.synchronize()
+   for _ in range(iters):
+       torch.cuda.reset_peak_memory_stats()
+# ... (중략)
+</code></pre>
+<h3>최종 요약 및 시각화</h3>
+<pre><code class="language-python">summary = {
+   &quot;gpu_name&quot;: gpu_name,
+   &quot;compute_capability&quot;: f&quot;{cc_major}.{cc_minor}&quot;,
+   &quot;te_available&quot;: te_available,
+   &quot;fp8_available&quot;: fp8_available,
+   &quot;fp8_reason&quot;: fp8_reason,
+   &quot;mode&quot;: mode_name,
+   &quot;baseline_eval_mse&quot;: baseline_eval,
+   &quot;te_path_eval_mse&quot;: te_eval,
+   &quot;baseline_mean_step_ms&quot;: baseline_bench[&quot;mean_ms&quot;],
+   &quot;te_path_mean_step_ms&quot;: te_bench[&quot;mean_ms&quot;],
+   &quot;baseline_peak_mem_mb&quot;: baseline_bench[&quot;max_memory_mb&quot;],
+   &quot;te_path_peak_mem_mb&quot;: te_bench[&quot;max_memory_mb&quot;],
+}
+
+
+print(&quot;\n&quot; + &quot;=&quot; * 120)
+print(&quot;SUMMARY&quot;)
+print(&quot;=&quot; * 120)
+print(json.dumps(summary, indent=2))
+
+
+plt.figure(figsize=(10, 5))
+plt.plot(baseline_losses, label=&quot;Baseline loss&quot;)
+plt.plot(te_losses, label=f&quot;{mode_name} loss&quot;)
+plt.xlabel(&quot;Training step&quot;)
+plt.ylabel(&quot;MSE loss&quot;)
+plt.title(&quot;Training Loss Comparison&quot;)
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+plt.figure(figsize=(8, 5))
+plt.bar([&quot;Baseline&quot;, mode_name], [baseline_bench[&quot;mean_ms&quot;], te_bench[&quot;mean_ms&quot;]])
+plt.ylabel(&quot;Mean train step time (ms)&quot;)
+plt.title(&quot;Speed Comparison&quot;)
+plt.grid(True, axis=&quot;y&quot;)
+plt.show()
+
+
+plt.figure(figsize=(8, 5))
+plt.bar([&quot;Baseline&quot;, mode_name], [baseline_bench[&quot;max_memory_mb&quot;], te_bench[&quot;max_memory_mb&quot;]])
+plt.ylabel(&quot;Peak memory (MB)&quot;)
+plt.title(&quot;Peak CUDA Memory Comparison&quot;)
+plt.grid(True, axis=&quot;y&quot;)
+plt.show()
+</code></pre>
+<h3>실무적으로 기억할 점</h3>
+<ul>
+<li>Transformer Engine 실험은 <strong>환경 진단</strong>이 먼저다. <code>torch.cuda.is_available()</code>, compute capability, <code>nvcc</code>, <code>cudnn.h</code> 유무를 먼저 확인해야 한다.</li>
+<li>FP8 경로는 하드웨어/빌드 상태 의존성이 커서, 항상 성공한다고 가정하면 안 된다.</li>
+<li>그래서 baseline mixed precision 경로와 TE 경로를 동시에 준비해 두는 것이 재현성과 실험 안정성에 유리하다.</li>
+<li>벤치마크는 평균 step 시간만 보지 말고 peak CUDA memory까지 함께 보는 편이 좋다.</li>
+</ul>
+<h3>원문 내 URL</h3>
+<ul>
+<li>NVIDIA Transformer Engine: <a href="https://github.com/NVIDIA/TransformerEngine">https://github.com/NVIDIA/TransformerEngine</a></li>
+<li>Full Codes/Notebook here: <a href="https://github.com/Marktechpost/AI-Tutorial-Codes-Included/blob/main/ML%20Project%20Codes/nvidia_transformer_engine_colab_mixed_precision_fp8_benchmarking_marktechpost.py">https://github.com/Marktechpost/AI-Tutorial-Codes-Included/blob/main/ML%20Project%20Codes/nvidia_transformer_engine_colab_mixed_precision_fp8_benchmarking_marktechpost.py</a></li>
+</ul>
+<p>Tags: #nvidia #transformer-engine #mixed-precision #fp8 #cuda #pytorch #benchmarking</p>
+
+    </article>
+  </main>
+</body>
+</html>

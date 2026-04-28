@@ -1,0 +1,23 @@
+{
+  "name": "html-vercel-blog",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "tbg": "node scripts/tbg.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "1.1.1",
+    "marked": "16.4.1",
+    "next": "16.1.6",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "vitest": "3.2.4"
+  }
+}
